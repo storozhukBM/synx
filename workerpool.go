@@ -1,15 +1,79 @@
 package synx
 
 import (
+	"fmt"
 	"math"
+	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 )
+
+type taskQueue struct {
+	_                       [64]byte
+	taskPointer             unsafe.Pointer
+	_                       [64]byte
+	taskWaitingMutex        *sync.Mutex
+	taskCond                *sync.Cond
+	schedulerCondition      *sync.Cond
+	currentlyWaitingWorkers int
+}
+
+func newQueue(maxWaiting time.Duration) *taskQueue {
+	taskWaitingMutex := &sync.Mutex{}
+	result := &taskQueue{taskWaitingMutex: taskWaitingMutex, taskCond: sync.NewCond(taskWaitingMutex), schedulerCondition: sync.NewCond(taskWaitingMutex)}
+	result.scheduleWakeupPeriods(maxWaiting)
+	return result
+}
+
+func (tq *taskQueue) scheduleWakeupPeriods(maxWaiting time.Duration) {
+	go func() {
+		for {
+			fmt.Println("wakeup scheduler is working")
+			time.Sleep(maxWaiting / 1000)
+			tq.taskCond.Broadcast()
+
+			tq.taskWaitingMutex.Lock()
+			if tq.currentlyWaitingWorkers == 0 {
+				tq.schedulerCondition.Wait()
+			}
+			tq.taskWaitingMutex.Unlock()
+		}
+	}()
+}
+
+func (tq *taskQueue) put(f func()) bool {
+	ok := atomic.CompareAndSwapPointer(&tq.taskPointer, nil, unsafe.Pointer(&f))
+	if ok {
+		tq.taskCond.Signal()
+		return true
+	}
+	return false
+}
+
+func (tq *taskQueue) pull(maxWaitingTime time.Duration) (func(), bool) {
+	pullFinish := time.Now().Add(maxWaitingTime)
+	for time.Now().Before(pullFinish) {
+		taskPointer := atomic.SwapPointer(&tq.taskPointer, nil)
+		if taskPointer != nil {
+			typedTaskPointer := (*func())(taskPointer)
+			return *typedTaskPointer, true
+		}
+
+		tq.taskWaitingMutex.Lock()
+		tq.currentlyWaitingWorkers++
+		tq.schedulerCondition.Signal()
+		tq.taskCond.Wait()
+		tq.currentlyWaitingWorkers--
+		tq.taskWaitingMutex.Unlock()
+	}
+	return nil, false
+}
 
 type WorkerPool struct {
 	maxWaitingWorkers     int32
 	maxWaitingTime        time.Duration
-	taskQueue             chan func()
+	taskQueue             *taskQueue
 	currentWaitingWorkers int32
 }
 
@@ -24,16 +88,16 @@ func NewWorkerPool(maxWaitingWorkers int, maxWaitingTime time.Duration) *WorkerP
 	return &WorkerPool{
 		maxWaitingWorkers: int32(maxWaitingWorkers),
 		maxWaitingTime:    maxWaitingTime,
-		taskQueue:         make(chan func()),
+		taskQueue:         newQueue(maxWaitingTime),
 	}
 }
 
 func (wp *WorkerPool) Do(task func()) {
-	select {
-	case wp.taskQueue <- task:
-	default:
-		go wp.startWorker(task)
+	ok := wp.taskQueue.put(task)
+	if ok {
+		return
 	}
+	go wp.startWorker(task)
 }
 
 func (wp *WorkerPool) CurrentWaitingWorkers() int {
@@ -43,9 +107,6 @@ func (wp *WorkerPool) CurrentWaitingWorkers() int {
 func (wp *WorkerPool) startWorker(task func()) {
 	task() // do the given task
 
-	tick := time.NewTicker(wp.maxWaitingTime)
-	defer tick.Stop()
-
 	workerLoop := func() (shouldContinue bool) {
 		currentWaitingWorkers := atomic.AddInt32(&wp.currentWaitingWorkers, 1)
 		defer atomic.AddInt32(&wp.currentWaitingWorkers, -1)
@@ -54,23 +115,12 @@ func (wp *WorkerPool) startWorker(task func()) {
 			return false // too many workers already waiting
 		}
 
-		// try to get task without blocking
-		select {
-		case t := <-wp.taskQueue:
-			t()
+		task, ok := wp.taskQueue.pull(wp.maxWaitingTime)
+		if ok {
+			task()
 			return true
-		default:
 		}
-
-		// wait for task, but the more workers we have - the shorter wait time gets
-		tick.Reset(time.Duration(wp.maxWaitingTime.Nanoseconds() / (int64(currentWaitingWorkers) * int64(currentWaitingWorkers))))
-		select {
-		case t := <-wp.taskQueue:
-			t()
-			return true
-		case <-tick.C:
-			return false
-		}
+		return false
 	}
 
 	for {

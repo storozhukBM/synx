@@ -56,7 +56,7 @@ func TestWorkerPool(t *testing.T) {
 
 func TestExponentialDeclineOfWaitingTime(t *testing.T) {
 	currentlyWorking := int64(0)
-	wp := NewWorkerPool(128, 10*60*time.Second)
+	wp := NewWorkerPool(128, 1000*time.Millisecond)
 	for i := 0; i < 200; i++ {
 		wp.Do(func() {
 			atomic.AddInt64(&currentlyWorking, 1)
@@ -64,6 +64,7 @@ func TestExponentialDeclineOfWaitingTime(t *testing.T) {
 			time.Sleep(5 * time.Millisecond)
 		})
 	}
+
 	go func() {
 		for {
 			wp.Do(func() {
@@ -71,10 +72,11 @@ func TestExponentialDeclineOfWaitingTime(t *testing.T) {
 				defer atomic.AddInt64(&currentlyWorking, -1)
 				time.Sleep(time.Millisecond)
 			})
-			time.Sleep(1000 * time.Microsecond)
+			time.Sleep(5_000 * time.Microsecond)
 		}
 	}()
-	for i := 0; i < 1000; i++ {
+
+	for i := 0; i < 10000; i++ {
 		fmt.Printf(
 			"%.4d ms: %.4d/%.4d %s\n",
 			i, atomic.LoadInt64(&currentlyWorking), wp.CurrentWaitingWorkers(),
