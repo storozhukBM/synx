@@ -35,7 +35,7 @@ func NewHedger(timeout time.Duration, upto int, worker HedgedWorker) HedgedWorke
 		worker:  worker,
 		timeout: timeout,
 		upto:    upto,
-		wp:      NewWorkerPool(10, time.Minute),
+		wp:      NewWorkerPool(0, 10, time.Minute),
 	}
 	return hedged
 }

@@ -4,16 +4,15 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
 
 func TestWorkerPool(t *testing.T) {
-	const maxWaitingTime = time.Second
+	const statsRefreshPeriod = time.Second
 	const shortDelay = 100 * time.Millisecond
 	const workers = 3
-	wp := NewWorkerPool(workers, maxWaitingTime)
+	wp := NewWorkerPool(0, workers, statsRefreshPeriod)
 
 	// submit tasks and grow till `workers` goroutines
 	startG := runtime.NumGoroutine()
@@ -24,7 +23,7 @@ func TestWorkerPool(t *testing.T) {
 			time.Sleep(shortDelay)
 		})
 
-		if wp.CurrentWaitingWorkers() != 0 {
+		if wp.WorkersInPool() != 0 {
 			t.Fatalf("some workers already waiting")
 		}
 
@@ -35,7 +34,7 @@ func TestWorkerPool(t *testing.T) {
 
 	// wait for tasks to finish and check that only max waiting workers are still waiting for new tasks
 	time.Sleep(time.Duration(float32(shortDelay.Nanoseconds()) * 1.2))
-	waitingWorkers := wp.CurrentWaitingWorkers()
+	waitingWorkers := wp.WorkersInPool()
 	if waitingWorkers != workers {
 		t.Fatalf("want %v, got %v", workers, waitingWorkers)
 	}
@@ -44,8 +43,8 @@ func TestWorkerPool(t *testing.T) {
 	}
 
 	// wait for workers to give up and exit
-	time.Sleep(maxWaitingTime)
-	waitingWorkers = wp.CurrentWaitingWorkers()
+	time.Sleep(statsRefreshPeriod)
+	waitingWorkers = wp.WorkersInPool()
 	if waitingWorkers != 0 {
 		t.Fatalf("want %v, got %v", 0, waitingWorkers)
 	}
@@ -55,30 +54,30 @@ func TestWorkerPool(t *testing.T) {
 }
 
 func TestExponentialDeclineOfWaitingTime(t *testing.T) {
-	currentlyWorking := int64(0)
-	wp := NewWorkerPool(128, 10*60*time.Second)
+	wp := NewWorkerPool(5, 128, 20*time.Millisecond)
 	for i := 0; i < 200; i++ {
 		wp.Do(func() {
-			atomic.AddInt64(&currentlyWorking, 1)
-			defer atomic.AddInt64(&currentlyWorking, -1)
 			time.Sleep(5 * time.Millisecond)
 		})
 	}
 	go func() {
 		for {
 			wp.Do(func() {
-				atomic.AddInt64(&currentlyWorking, 1)
-				defer atomic.AddInt64(&currentlyWorking, -1)
-				time.Sleep(time.Millisecond)
+				time.Sleep(1 * time.Millisecond)
 			})
 			time.Sleep(1000 * time.Microsecond)
 		}
 	}()
 	for i := 0; i < 1000; i++ {
+		bar := strings.Repeat("*", wp.CurrentRunningWorkers())
+		workersWaiting := wp.WorkersInPool() - wp.CurrentRunningWorkers()
+		if workersWaiting > 0 {
+			bar = bar + strings.Repeat("-", workersWaiting)
+		}
 		fmt.Printf(
-			"%.4d ms: %.4d/%.4d %s\n",
-			i, atomic.LoadInt64(&currentlyWorking), wp.CurrentWaitingWorkers(),
-			strings.Repeat("*", int(atomic.LoadInt64(&currentlyWorking)))+strings.Repeat("-", (wp.CurrentWaitingWorkers())),
+			"%.4d ms: [%.4d/%.4d] (%.4d|%.4d) %s\n",
+			i, wp.CurrentRunningWorkers(), wp.WorkersInPool(), wp.MaxConcurrentWorkersWithinCurrentPeriod(), wp.TargetWaitingWorkers(),
+			bar,
 		)
 		time.Sleep(time.Millisecond)
 	}
