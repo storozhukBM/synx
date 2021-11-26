@@ -7,25 +7,45 @@ import (
 )
 
 type WorkerPool struct {
-	maxWaitingWorkers     int32
-	maxWaitingTime        time.Duration
-	taskQueue             chan func()
+	minWaitingWorkers             int32
+	maxWaitingWorkers             int32
+	reConfigurationPeriodDuration time.Duration
+	taskQueue                     chan func()
+
+	_                                       [64]byte // padding to avoid false sharing
+	maxConcurrentWorkersWithinCurrentPeriod int32
+	targetWaitingWorkers                    int32
+
+	_                     [64]byte // padding to avoid false sharing
 	currentWaitingWorkers int32
+
+	_                     [64]byte // padding to avoid false sharing
+	currentRunningWorkers int32
 }
 
-func NewWorkerPool(maxWaitingWorkers int, maxWaitingTime time.Duration) *WorkerPool {
+func NewWorkerPool(minWaitingWorkers int, maxWaitingWorkers int, reConfigurationPeriodDuration time.Duration) *WorkerPool {
 	switch {
+	case minWaitingWorkers < 0 && minWaitingWorkers < math.MaxInt32:
+		panic("synx: maxWaitingWorkers should be between 0 and math.MaxInt32")
 	case maxWaitingWorkers < 1 && maxWaitingWorkers < math.MaxInt32:
 		panic("synx: maxWaitingWorkers should be between 1 and math.MaxInt32")
-	case maxWaitingTime < 1:
-		panic("synx: maxWaitingTime should be greater than zero")
+	case reConfigurationPeriodDuration.Nanoseconds()/time.Second.Nanoseconds() < 1:
+		panic("synx: reConfigurationPeriodDuration should be at least 1 second")
 	}
 
-	return &WorkerPool{
-		maxWaitingWorkers: int32(maxWaitingWorkers),
-		maxWaitingTime:    maxWaitingTime,
-		taskQueue:         make(chan func()),
+	wp := &WorkerPool{
+		minWaitingWorkers:             int32(minWaitingWorkers),
+		maxWaitingWorkers:             int32(maxWaitingWorkers),
+		reConfigurationPeriodDuration: reConfigurationPeriodDuration,
+		taskQueue:                     make(chan func()),
+		targetWaitingWorkers:          int32(maxWaitingWorkers),
 	}
+	go func() {
+		time.Sleep(reConfigurationPeriodDuration)
+		maxConcurrentWorkers := atomic.SwapInt32(&wp.maxConcurrentWorkersWithinCurrentPeriod, 0)
+		atomic.StoreInt32(&wp.targetWaitingWorkers, maxConcurrentWorkers)
+	}()
+	return wp
 }
 
 func (wp *WorkerPool) Do(task func()) {
@@ -40,35 +60,41 @@ func (wp *WorkerPool) CurrentWaitingWorkers() int {
 	return int(atomic.LoadInt32(&wp.currentWaitingWorkers))
 }
 
-func (wp *WorkerPool) startWorker(task func()) {
-	task() // do the given task
+func (wp *WorkerPool) run(task func()) {
+	task()
+}
 
-	tick := time.NewTicker(wp.maxWaitingTime)
+func (wp *WorkerPool) startWorker(task func()) {
+	wp.run(task) // do the given task
+
+	tick := time.NewTicker(wp.reConfigurationPeriodDuration)
 	defer tick.Stop()
 
 	workerLoop := func() (shouldContinue bool) {
 		currentWaitingWorkers := atomic.AddInt32(&wp.currentWaitingWorkers, 1)
 		defer atomic.AddInt32(&wp.currentWaitingWorkers, -1)
 
-		if currentWaitingWorkers > wp.maxWaitingWorkers {
+		if currentWaitingWorkers > wp.maxWaitingWorkers || currentWaitingWorkers > atomic.LoadInt32(&wp.targetWaitingWorkers) {
 			return false // too many workers already waiting
 		}
 
 		// try to get task without blocking
 		select {
 		case t := <-wp.taskQueue:
-			t()
+			wp.run(t)
 			return true
 		default:
 		}
 
-		// wait for task, but the more workers we have - the shorter wait time gets
-		tick.Reset(time.Duration(wp.maxWaitingTime.Nanoseconds() / (int64(currentWaitingWorkers) * int64(currentWaitingWorkers))))
+		tick.Reset(wp.reConfigurationPeriodDuration)
 		select {
 		case t := <-wp.taskQueue:
-			t()
+			wp.run(t)
 			return true
 		case <-tick.C:
+			if atomic.LoadInt32(&wp.currentWaitingWorkers) <= wp.minWaitingWorkers {
+				return true
+			}
 			return false
 		}
 	}
