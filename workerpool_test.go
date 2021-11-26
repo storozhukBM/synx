@@ -9,7 +9,7 @@ import (
 )
 
 func TestWorkerPool(t *testing.T) {
-	const statsRefreshPeriod = time.Second
+	const statsRefreshPeriod = time.Second / 3
 	const shortDelay = 100 * time.Millisecond
 	const workers = 3
 	wp := NewWorkerPool(0, workers, statsRefreshPeriod)
@@ -43,7 +43,7 @@ func TestWorkerPool(t *testing.T) {
 	}
 
 	// wait for workers to give up and exit
-	time.Sleep(statsRefreshPeriod)
+	time.Sleep(4 * statsRefreshPeriod)
 	waitingWorkers = wp.WorkersInPool()
 	if waitingWorkers != 0 {
 		t.Fatalf("want %v, got %v", 0, waitingWorkers)

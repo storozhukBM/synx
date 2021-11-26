@@ -42,6 +42,7 @@ func NewWorkerPool(minWaitingWorkers int, maxWaitingWorkers int, reConfiguration
 	}
 	go func() {
 		for {
+			//TODO: use context here to free resources
 			time.Sleep(reConfigurationPeriodDuration)
 			prevTarget := atomic.LoadInt32(&wp.targetWaitingWorkers)
 			maxConcurrentWorkers := atomic.SwapInt32(&wp.maxConcurrentWorkersWithinCurrentPeriod, 0)
