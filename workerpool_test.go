@@ -2,6 +2,7 @@ package synx
 
 import (
 	"fmt"
+	"math"
 	"runtime"
 	"strings"
 	"testing"
@@ -54,18 +55,23 @@ func TestWorkerPool(t *testing.T) {
 }
 
 func TestExponentialDeclineOfWaitingTime(t *testing.T) {
-	wp := NewWorkerPool(5, 128, 20*time.Millisecond)
-	for i := 0; i < 200; i++ {
-		wp.Do(func() {
-			time.Sleep(5 * time.Millisecond)
-		})
-	}
+	wp := NewWorkerPool(5, 128, 10*time.Millisecond)
 	go func() {
 		for {
 			wp.Do(func() {
 				time.Sleep(1 * time.Millisecond)
 			})
-			time.Sleep(1000 * time.Microsecond)
+			verticalShift := 20_000.0
+			amplitude := 17_000.0
+			periodLength := 75.0
+			d := time.Duration(
+				verticalShift +
+					amplitude*
+						math.Sin(
+							float64(time.Now().UnixMilli())*(2*math.Pi/periodLength),
+						),
+			)
+			time.Sleep(d)
 		}
 	}()
 	for i := 0; i < 1000; i++ {
@@ -76,7 +82,7 @@ func TestExponentialDeclineOfWaitingTime(t *testing.T) {
 		}
 		fmt.Printf(
 			"%.4d ms: [%.4d/%.4d] (%.4d|%.4d) %s\n",
-			i, wp.CurrentRunningWorkers(), wp.WorkersInPool(), wp.MaxConcurrentWorkersWithinCurrentPeriod(), wp.TargetWaitingWorkers(),
+			i, wp.CurrentRunningWorkers(), wp.WorkersInPool(), wp.MaxConcurrencyObservedInCycle(), wp.TargetWorkersInPool(),
 			bar,
 		)
 		time.Sleep(time.Millisecond)
