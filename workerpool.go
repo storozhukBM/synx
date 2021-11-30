@@ -6,6 +6,26 @@ import (
 	"time"
 )
 
+// WorkerPool allows you to execute any function in a separate goroutine
+// it is designed to act exactly like 'go' operator, with the only difference that
+// goroutines after they finish the task, will stay for a bit and wait for additional tasks.
+//
+// This instrument allows you to reduce the overhead of creating new goroutines
+// if your tasks are so small that such overhead can become noticeable.
+//
+// Another scenario where WorkerPool can help is when your typical task triggers goroutine stack growth,
+// and you want to avoid creation and stack expansion repeated over and over.
+//
+// This WorkerPool is also adaptive. It tracks how many concurrent tasks it runs during adaptationPeriod
+// and tries to keep at least that amount of workers ready within the next adaptationPeriod.
+//
+// WorkerPool has a few knobs that you can configure:
+//  - minWorkersInPool - min amount goroutines to keep waiting for new tasks, after its creation
+//  - maxWorkersInPool - max amount goroutines to keep waiting for new tasks, after its creation,
+//                       note that when you reach this maximum, WorkerPool still accepts new tasks,
+//                       but goroutines that work on those tasks won't stay in a pool after task is finished
+//  - adaptationPeriod - specifies how often WorkerPool measures the maximum of concurrent tasks and
+//                       reconfigures itself for a newly measured targetWorkersInPool
 type WorkerPool struct {
 	adaptationTicker      <-chan time.Time
 	adaptationPeriod      time.Duration
@@ -23,7 +43,19 @@ type WorkerPool struct {
 	_                     [64 - 4]byte // padding to avoid false sharing
 }
 
-func NewWorkerPool(minWorkersInPool int, maxWorkersInPool int, adaptationPeriod time.Duration) *WorkerPool {
+// NewWorkerPool creates new WorkerPool with fully adaptive workers size and default adaptationPeriod of 10 seconds
+func NewWorkerPool() *WorkerPool {
+	return NewWorkerPoolWithOptions(0, math.MaxInt32-1, 10*time.Second)
+}
+
+// NewWorkerPoolWithOptions creates new WorkerPool with the specified params:
+//  - minWorkersInPool - min amount goroutines to keep waiting for new tasks, after its creation
+//  - maxWorkersInPool - max amount goroutines to keep waiting for new tasks, after its creation,
+//                       note that when you reach this maximum, WorkerPool still accepts new tasks,
+//                       but goroutines that work on those tasks won't stay in a pool after task is finished
+//  - adaptationPeriod - specifies how often WorkerPool measures the maximum of concurrent tasks and
+//                       reconfigures itself for a newly measured targetWorkersInPool
+func NewWorkerPoolWithOptions(minWorkersInPool int, maxWorkersInPool int, adaptationPeriod time.Duration) *WorkerPool {
 	switch {
 	case minWorkersInPool < 0 && minWorkersInPool < math.MaxInt32:
 		panic("synx: maxWorkersInPool should be between 0 and math.MaxInt32")
@@ -44,6 +76,8 @@ func NewWorkerPool(minWorkersInPool int, maxWorkersInPool int, adaptationPeriod 
 	return wp
 }
 
+// Do is an equivalent of `go` operator, it never blocks and executes the specified task
+// on some already waiting goroutine from a pool or creates a new one
 func (wp *WorkerPool) Do(task func()) {
 	select {
 	case wp.taskQueue <- task:
@@ -52,18 +86,25 @@ func (wp *WorkerPool) Do(task func()) {
 	}
 }
 
+// WorkersInPool returns a number of goroutines that are currently members of a pool.
+// This number can be higher than CurrentRunningWorkers, because some workers can just execute the task
+// and die without joining the pool, if maxWorkersInPool or targetWorkersInPool is already reached
 func (wp *WorkerPool) WorkersInPool() int {
 	return int(atomic.LoadInt32(&wp.workersInPool))
 }
 
+// CurrentRunningWorkers returns a number of workers that execute some task right now
 func (wp *WorkerPool) CurrentRunningWorkers() int {
 	return int(atomic.LoadInt32(&wp.currentRunningWorkers))
 }
 
+// MaxConcurrencyObservedInCycle returns a maximum CurrentRunningWorkers number observed within current adaptation period
 func (wp *WorkerPool) MaxConcurrencyObservedInCycle() int {
 	return int(atomic.LoadInt32(&wp.maxConcurrencyInCycle))
 }
 
+// TargetWorkersInPool returns a current desired number of goroutines in a pool,
+// this number gets re-evaluated every adaptation period
 func (wp *WorkerPool) TargetWorkersInPool() int {
 	return int(atomic.LoadInt32(&wp.targetWorkersInPool))
 }

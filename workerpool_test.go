@@ -13,7 +13,7 @@ func TestWorkerPool(t *testing.T) {
 	const statsRefreshPeriod = time.Second / 3
 	const shortDelay = 100 * time.Millisecond
 	const workers = 3
-	wp := NewWorkerPool(0, workers, statsRefreshPeriod)
+	wp := NewWorkerPoolWithOptions(0, workers, statsRefreshPeriod)
 
 	// submit tasks and grow till `workers` goroutines
 	startG := runtime.NumGoroutine()
@@ -55,7 +55,7 @@ func TestWorkerPool(t *testing.T) {
 }
 
 func TestExponentialDeclineOfWaitingTime(t *testing.T) {
-	wp := NewWorkerPool(5, 128, 10*time.Millisecond)
+	wp := NewWorkerPoolWithOptions(5, 128, 10*time.Millisecond)
 	go func() {
 		for {
 			wp.Do(func() {
